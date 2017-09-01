@@ -26,7 +26,6 @@ That cython directory must be in PYTHONPATH / sys.path.
 import urllib.parse
 import asyncio
 import weakref
-import socket
 
 from ..message import Message
 from .. import interfaces, error
@@ -44,16 +43,18 @@ DTLS_EVENT_CONNECT = 0x01DC
 DTLS_EVENT_CONNECTED = 0x01DE
 DTLS_EVENT_RENEGOTIATE = 0x01DF
 
-LEVEL_NOALERT = 0 # seems only to be issued by tinydtls-internal events
+LEVEL_NOALERT = 0  # seems only to be issued by tinydtls-internal events
 
 # from RFC 5246
 LEVEL_WARNING = 1
 LEVEL_FATAL = 2
 CODE_CLOSE_NOTIFY = 0
 
+
 class DTLSSecurityStore:
     def _get_psk(self, host, port):
         return b"Client_identity", b"secretPSK"
+
 
 class DTLSClientConnection:
     # for now i'd assyme the connection can double as an address. this means it
@@ -82,9 +83,8 @@ class DTLSClientConnection:
     @classmethod
     @asyncio.coroutine
     def start(cls, host, port, pskId, psk, main):
-        transport, self = yield from main.loop.create_datagram_endpoint(cls,
-                remote_addr=(host, port),
-                )
+        transport, self = yield from main.loop.create_datagram_endpoint(
+            cls, remote_addr=(host, port))
 
         self.main = main
 
@@ -97,7 +97,8 @@ class DTLSClientConnection:
                 pskId=pskId,
                 pskStore={pskId: psk},
                 )
-        self._connection = self._dtls_socket.connect(_SENTINEL_ADDRESS, _SENTINEL_PORT)
+        self._connection = self._dtls_socket.connect(
+            _SENTINEL_ADDRESS, _SENTINEL_PORT)
 
         self._connecting = asyncio.Future()
         yield from self._connecting
@@ -115,7 +116,8 @@ class DTLSClientConnection:
         try:
             message = Message.decode(data, self)
         except error.UnparsableMessage:
-            self.log.warning("Ignoring unparsable message from %s"%(address,))
+            self.log.warning(
+                "Ignoring unparsable message from {}".format(sender))
             return
 
         self.main.new_message_callback(message)
@@ -153,7 +155,7 @@ class DTLSClientConnection:
     # transport protocol
 
     def connection_made(self, transport):
-        pass # already handled in .start()
+        pass  # already handled in .start()
 
     def connection_lost(self, exc):
         print("Oups, the connection was lost:", exc)
@@ -168,16 +170,21 @@ class DTLSClientConnection:
             # FIXME shut down immediately
 
     def datagram_received(self, data, addr):
-        self._dtls_socket.handleMessage(self._connection, data)
+        self._dtls_socket.handleMessage(self._connection, data, 0)
+
 
 class TransportEndpointTinyDTLS(interfaces.TransportEndpoint):
-    def __init__(self, new_message_callback, new_error_callback, log, loop):
-        self._pool = weakref.WeakValueDictionary({}) # see _connection_for_address
+    def __init__(self, new_message_callback, new_error_callback,
+                 log, loop, psk_auth=None):
+
+        self._pool = weakref.WeakValueDictionary({})  # see _connection_for_address
 
         self.new_message_callback = new_message_callback
         self.new_error_callback = new_error_callback
         self.log = log
         self.loop = loop
+
+        self.psk_auth = psk_auth
 
         self.security = DTLSSecurityStore()
 
@@ -192,16 +199,24 @@ class TransportEndpointTinyDTLS(interfaces.TransportEndpoint):
             return self._pool[(host, port, pskId)]
         except KeyError:
             # FIXME this would need locking so it's bad design
-            connection = yield from DTLSClientConnection.start(host, port, pskId, psk, self)
+            connection = yield from DTLSClientConnection.start(
+                host, port, pskId, psk, self)
             self._pool[(host, port, pskId)] = connection
             return connection
 
     @classmethod
     @asyncio.coroutine
-    def create_client_transport_endpoint(cls, new_message_callback, new_error_callback, log, loop, dump_to):
+    def create_client_transport_endpoint(
+        cls, new_message_callback, new_error_callback, log,
+            loop, dump_to, psk_auth=None):
+
+        instance = cls(
+            new_message_callback, new_error_callback, log, loop, psk_auth)
+
         if dump_to is not None:
-            self.error("Ignoring dump_to in tinyDTLS transport endpoint")
-        return cls(new_message_callback, new_error_callback, log, loop)
+            instance.error("Ignoring dump_to in tinyDTLS transport endpoint")
+
+        return instance
 
     @asyncio.coroutine
     def determine_remote(self, request):
@@ -209,16 +224,19 @@ class TransportEndpointTinyDTLS(interfaces.TransportEndpoint):
             return None
 
         if request.unresolved_remote:
-            pseudoparsed = urllib.parse.SplitResult(None, request.unresolved_remote, None, None, None)
+            pseudoparsed = urllib.parse.SplitResult(
+                None, request.unresolved_remote, None, None, None)
             host = pseudoparsed.hostname
             port = pseudoparsed.port or COAPS_PORT
         elif request.opt.uri_host:
             host = request.opt.uri_host
             port = request.opt.uri_port or COAPS_PORT
         else:
-            raise ValueError("No location found to send message to (neither in .opt.uri_host nor in .remote)")
+            raise ValueError(
+                "No location found to send message to"
+                "(neither in .opt.uri_host nor in .remote)")
 
-        pskId, psk = self.security._get_psk(host, port)
+        pskId, psk = self.psk_auth
         result = yield from self._connection_for_address(host, port, pskId, psk)
         return result
 

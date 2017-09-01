@@ -22,16 +22,13 @@ messages:
 
 import os
 import random
-import struct
 import binascii
 import functools
-import socket
 import asyncio
 import weakref
 
 from .util.asyncio import AsyncGenerator, cancel_thoroughly
 from .util import hostportjoin
-from . import error
 from .optiontypes import BlockOption
 
 import logging
@@ -485,7 +482,6 @@ class Context(interfaces.RequestProvider):
     def next_token(self):
         """Reserve and return a new Token for request."""
         #TODO: add proper Token handling
-        token = self.token
         self.token = (self.token + 1) & 0xffffffffffffffff
         return binascii.a2b_hex("%08x"%self.token)
 
@@ -506,7 +502,8 @@ class Context(interfaces.RequestProvider):
 
     @classmethod
     @asyncio.coroutine
-    def create_client_context(cls, *, dump_to=None, loggername="coap", loop=None):
+    def create_client_context(
+        cls, *, dump_to=None, loggername="coap", loop=None, psk_auth=None):
         """Create a context bound to all addresses on a random listening port.
 
         This is the easiest way to get an context suitable for sending client
@@ -521,8 +518,21 @@ class Context(interfaces.RequestProvider):
         from .transports.udp6 import TransportEndpointUDP6
         from .transports.tinydtls import TransportEndpointTinyDTLS
 
-        self.transport_endpoints.append((yield from TransportEndpointUDP6.create_client_transport_endpoint(new_message_callback=self._dispatch_message, new_error_callback=self._dispatch_error, log=self.log, loop=loop, dump_to=dump_to)))
-        self.transport_endpoints.append((yield from TransportEndpointTinyDTLS.create_client_transport_endpoint(new_message_callback=self._dispatch_message, new_error_callback=self._dispatch_error, log=self.log, loop=loop, dump_to=dump_to)))
+        self.transport_endpoints.append(
+            (yield from TransportEndpointUDP6.create_client_transport_endpoint(
+                new_message_callback=self._dispatch_message,
+                new_error_callback=self._dispatch_error,
+                log=self.log, loop=loop, dump_to=dump_to
+            ))
+        )
+        self.transport_endpoints.append(
+            (yield from TransportEndpointTinyDTLS.create_client_transport_endpoint(
+                new_message_callback=self._dispatch_message,
+                new_error_callback=self._dispatch_error,
+                psk_auth=psk_auth,
+                log=self.log, loop=loop, dump_to=dump_to
+            ))
+        )
 
         return self
 
@@ -705,7 +715,7 @@ class Request(BaseRequest, interfaces.Request):
         """Process incoming response with regard to Block1 option."""
 
         if response.opt.block1 is None:
-            # it's not up to us here to 
+            # it's not up to us here to
             if response.code.is_successful(): # an error like "unsupported option" would be ok to return, but success?
                 self.log.warning("Block1 option completely ignored by server, assuming it knows what it is doing.")
             self.process_block2_in_response(response)
